@@ -25,3 +25,6 @@ P0-memory-identity-beastmode-.tar.gz
 
 pcmciaguard-.tar.gz
 5a6b7c796993494432ccb786f67e2fb066b35a8a4fc16b399632a399209a1864  
+
+p0-firewall-recreation.tar.gz
+170a0e48451abde18694180c18f7c94e5237d9afc350d92f064ed6feb58c0f15
