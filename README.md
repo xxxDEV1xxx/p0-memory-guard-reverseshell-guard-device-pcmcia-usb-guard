@@ -28,3 +28,11 @@ pcmciaguard-.tar.gz
 
 p0-firewall-recreation.tar.gz
 170a0e48451abde18694180c18f7c94e5237d9afc350d92f064ed6feb58c0f15
+
+
+"If you make an iso of your OS,  burn it to CD.
+If you burn it to CD, dd if=/dev/sd0 of=/dev/sda conv=noerror,sync status=progress and burn it to a drive.
+If you burn it to a drive, add another partition on the rest of the space.
+If you add another partition, sda1 is iso9660 write proofed, so bindmount and overlay folders on sda2
+The boot OS is now nearly immutable with few exceptions."
+Christopher T. Williams
