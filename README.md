@@ -1,5 +1,5 @@
 Verify sha
-Linux: sha256sum *..tar.gz
+Linux: sha256sum *.tar.gz
 Windows: Get-FileHash P0-reverseshell-v3-production-.tar.gz -algorithm sha256
 
 P0-reverseshell-v3-production-.tar.gz
