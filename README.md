@@ -1,3 +1,18 @@
+## License
+Copyright (c) 2026 Christopher T. Williams
+
+## License
+
+Permission is granted to use, copy, modify, and distribute this software
+for research, testing, and security-analysis purposes, provided that the
+copyright notice and this permission notice are retained.
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, OR NON-INFRINGEMENT. THE AUTHOR SHALL
+NOT BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE
+USE OF THIS SOFTWARE.
+
 Verify sha
 Linux: sha256sum *.tar.gz
 Windows: Get-FileHash P0-reverseshell-v3-production-.tar.gz -algorithm sha256
