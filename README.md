@@ -31,7 +31,7 @@ p0-firewall-recreation.tar.gz
 
 
 "If you make an iso of your OS,  burn it to CD.
-If you burn it to CD, dd if=/dev/sd0 of=/dev/sda conv=noerror,sync status=progress and burn it to a drive.
+If you burn it to CD, dd if=/dev/sd0 of=/dev/sda1 conv=noerror,sync status=progress and burn it to a drive.
 If you burn it to a drive, add another partition on the rest of the space.
 If you add another partition, sda1 is iso9660 write proofed, so bindmount and overlay folders on sda2
 The boot OS is now nearly immutable with few exceptions."
