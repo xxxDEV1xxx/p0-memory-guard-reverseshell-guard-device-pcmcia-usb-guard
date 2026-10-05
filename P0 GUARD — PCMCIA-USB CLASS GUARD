@@ -1,0 +1,542 @@
+# P0 GUARD — PCMCIA/USB CLASS GUARD
+
+## USB Class-Code-Based Peripheral Enforcement
+
+### Whitepaper 3 — Early Development
+
+### Abstract
+
+The P0 PCMCIA/USB Guard is an early-development peripheral security component designed to control USB devices according to their declared USB interface class codes. Rather than relying exclusively on device names, vendor strings, product descriptions, or application-level identification, the guard evaluates the numeric USB class associated with a device interface and applies an explicit security policy.
+
+The current implementation operates at the Linux USB/sysfs layer. It enumerates USB interfaces, reads their `bInterfaceClass` values, compares those values against a compiled device-class policy, and can deauthorize interfaces that match a denied class.
+
+The objective is to establish a low-level peripheral enforcement mechanism that can become a component of the broader P0 Guard security architecture.
+
+Because this component is still under development, this document distinguishes the functionality presently demonstrated by the implementation from capabilities intended for future versions.
+
+---
+
+## 1. Purpose
+
+The P0 PCMCIA/USB Guard addresses a different security layer from the P0 application and reverse-shell guards.
+
+The Beastmode implementation is concerned with programs and application identity.
+
+The reverse-shell component is concerned with network behavior and unauthorized remote sessions.
+
+The PCMCIA/USB Guard is concerned with physical peripheral interfaces.
+
+Its fundamental policy model is:
+
+> Identify the USB interface by its numeric class code, compare that code against the P0 security policy, and deny authorization when the class is prohibited.
+
+This provides a deterministic enforcement mechanism independent of the descriptive name presented by the device.
+
+---
+
+## 2. Security Objective
+
+USB devices can introduce several classes of security risk, including unauthorized communications hardware, storage devices, custom USB peripherals, malicious or modified firmware, and devices intentionally masquerading as something benign.
+
+A policy based solely on a device's human-readable identity can therefore be insufficient.
+
+The P0 approach introduces a lower-level classification mechanism.
+
+Conceptually:
+
+```text
+USB Device
+     |
+     v
+USB Interface
+     |
+     v
+bInterfaceClass
+     |
+     v
+Numeric Class Code
+     |
+     v
+P0 Device-Class Policy
+     |
+     +---- ALLOW ----> Interface remains authorized
+     |
+     +---- DENY -----> Interface deauthorized
+```
+
+The numeric class becomes the primary policy attribute for the current implementation.
+
+---
+
+## 3. Current Development Status
+
+The PCMCIA/USB Guard is explicitly an early-development component.
+
+The current implementation demonstrates the following architecture:
+
+1. Enumerate USB devices through Linux sysfs.
+2. Identify USB interface directories.
+3. Read the interface's `bInterfaceClass`.
+4. Convert the class representation into a numeric value.
+5. Compare the value against the compiled device-class policy.
+6. If the policy returns `DENY`, write to the interface's authorization control.
+7. Continue monitoring for newly appearing USB interfaces.
+
+The current implementation is therefore best characterized as:
+
+> USB interface-class enforcement with continuous monitoring.
+
+It should not yet be represented as a finished PCMCIA security product or as complete USB device security.
+
+---
+
+## 4. USB Class-Code Enforcement
+
+USB interfaces expose standardized class information.
+
+The current P0 policy is represented by numeric class codes. The development policy includes:
+
+```text
+0x07  Printer
+0xE0  Wireless Controller
+0xFF  Vendor-Specific
+```
+
+The policy associates each class with an enforcement decision.
+
+Conceptually:
+
+```c
+{
+    DEVICE_BUS_USB,
+    0x07,
+    DEVICE_POLICY_DENY,
+    "printer"
+}
+```
+
+The important security property is that the enforcement decision is derived from the numeric class value rather than from the displayed device name.
+
+For example, a device presenting a misleading product name does not change the fact that its interface reports a particular USB class code.
+
+---
+
+## 5. Interface-Level Enforcement
+
+The current implementation operates on USB interfaces rather than treating every physical USB device as a single undifferentiated object.
+
+The guard examines entries under:
+
+```text
+/sys/bus/usb/devices/
+```
+
+USB interface directories are identified by the Linux interface naming convention containing `:`.
+
+The guard then reads:
+
+```text
+bInterfaceClass
+bInterfaceSubClass
+bInterfaceProtocol
+```
+
+The class value is used for the current policy decision.
+
+When a denied interface is encountered, the implementation can deauthorize it through its sysfs authorization control.
+
+Conceptually:
+
+```text
+bInterfaceClass = denied class
+            |
+            v
+     Policy decision
+            |
+          DENY
+            |
+            v
+/sys/.../<interface>/authorized
+            |
+            v
+           0
+```
+
+This is substantially lower-level than blocking an application that happens to use the device.
+
+---
+
+## 6. Why Numeric Codes Are Important
+
+A USB device can expose human-readable information such as:
+
+```text
+Manufacturer
+Product
+Serial Number
+Device Name
+Vendor ID
+Product ID
+```
+
+Those attributes can be useful for identification, but they are not necessarily sufficient as a security boundary.
+
+The class-code approach provides another identity dimension:
+
+```text
+"What type of USB interface does the device claim to implement?"
+```
+
+P0 can then establish a policy such as:
+
+```text
+Class 0x07  -> DENY
+Class 0xE0  -> DENY
+Class 0xFF  -> DENY
+```
+
+This creates a simple and auditable security rule set.
+
+---
+
+## 7. Current Policy Architecture
+
+The current policy is compiled into the guard through a device-class policy definition.
+
+The architecture separates the policy decision from the USB enumeration mechanism.
+
+Conceptually:
+
+```text
+USB Enumeration
+       |
+       v
+Interface Identity
+       |
+       v
+device_class_policy()
+       |
+       v
+ALLOW / DENY
+       |
+       v
+USB Enforcement
+```
+
+This separation is important for future development because the policy engine can eventually become more sophisticated without requiring the USB enumeration layer to be completely rewritten.
+
+---
+
+## 8. Persistent Operation
+
+The current development tree also contains a persistent daemon wrapper.
+
+The daemon repeatedly invokes the USB class guard and waits before scanning again.
+
+The intended operating model is:
+
+```text
+Boot
+ |
+ v
+systemd
+ |
+ v
+p0-pcmciaguard.service
+ |
+ v
+usb-class-guard-daemon
+ |
+ +--> scan
+ |
+ +--> enforce policy
+ |
+ +--> wait
+ |
+ +--> scan again
+ |
+ +--> ...
+```
+
+The systemd service is configured to restart following a failure.
+
+This allows the guard to remain active rather than operating only as a manually executed scan.
+
+---
+
+## 9. Security Boundary
+
+The current PCMCIA/USB Guard should not be confused with application blocking.
+
+It does not currently answer:
+
+> "Is this program malicious?"
+
+Instead, it answers:
+
+> "Does this USB interface belong to a class that P0 has prohibited?"
+
+That distinction is fundamental.
+
+The three P0 Guard components therefore address different security planes:
+
+```text
+P0 GUARD
+   |
+   +-- Beastmode
+   |      Application identity / program enforcement
+   |
+   +-- Reverse-Shell Guard
+   |      Network session / process behavior enforcement
+   |
+   +-- PCMCIA/USB Guard
+          Peripheral / USB class enforcement
+```
+
+Together, these mechanisms can form a layered security architecture.
+
+---
+
+## 10. Threat Model
+
+The PCMCIA/USB Guard is intended to mitigate threats involving unauthorized USB peripheral classes.
+
+Relevant scenarios include:
+
+* Unauthorized wireless USB hardware.
+* USB interfaces belonging to prohibited classes.
+* Vendor-specific USB interfaces.
+* Peripheral insertion intended to bypass higher-level application controls.
+* Devices whose descriptive names are misleading.
+* Repeated insertion of prohibited devices after boot.
+* Peripheral-based attempts to introduce an unauthorized hardware capability.
+
+The guard is particularly useful where the security requirement is based on the capability represented by a USB interface rather than the marketing name assigned to the physical device.
+
+---
+
+## 11. Limitations of the Current Implementation
+
+The early-development designation is important.
+
+The current implementation should not yet be described as comprehensive USB device security.
+
+In particular, the current class-policy mechanism is based primarily on the USB interface class.
+
+A production implementation may need additional attributes, including:
+
+```text
+Vendor ID
+Product ID
+Serial Number
+Device class
+Interface class
+Subclass
+Protocol
+USB topology
+Physical port
+Authorization state
+```
+
+Composite USB devices also require careful consideration because a single physical device can expose multiple interfaces with different class codes.
+
+For example:
+
+```text
+Physical USB Device
+        |
+        +-- Interface 0 -> Class A
+        |
+        +-- Interface 1 -> Class B
+        |
+        +-- Interface 2 -> Class C
+```
+
+A future policy engine must define whether a single denied interface causes the entire physical device to be rejected.
+
+---
+
+## 12. PCMCIA Terminology
+
+The project is referred to as the P0 PCMCIA/USB Guard because it is intended as part of the broader peripheral-control security layer.
+
+The implementation currently described in this paper is specifically operating against Linux USB devices through sysfs.
+
+Accordingly, the technically precise description of the current implementation is:
+
+> Linux USB interface class-code enforcement.
+
+Actual PCMCIA/CardBus-specific enforcement would require a corresponding implementation for those device buses and their kernel interfaces.
+
+---
+
+## 13. Development Roadmap
+
+The next development stages can expand the current class-code mechanism into a complete peripheral policy engine.
+
+Potential stages include:
+
+### Phase 1 — Current
+
+USB class-code detection and denial.
+
+### Phase 2
+
+Expanded policy fields:
+
+```text
+Bus
+Class
+Subclass
+Protocol
+Vendor ID
+Product ID
+Serial Number
+```
+
+### Phase 3
+
+Composite-device policy.
+
+A policy decision can be made against the entire physical device instead of individual interfaces where appropriate.
+
+### Phase 4
+
+Runtime policy management.
+
+Administrators can modify allow/deny rules without recompiling the guard.
+
+### Phase 5
+
+Administrative exceptions.
+
+Trusted hardware can receive explicit allow rules.
+
+### Phase 6
+
+Audit and telemetry.
+
+Every enforcement event can record:
+
+```text
+Timestamp
+Bus
+Device
+Interface
+Class
+Subclass
+Protocol
+Vendor ID
+Product ID
+Policy decision
+Enforcement result
+```
+
+### Phase 7
+
+Integration with the other P0 Guard components.
+
+Peripheral events can become inputs to the broader P0 security policy.
+
+---
+
+## 14. Validation Requirements
+
+Before the component is considered production-ready, testing should include at minimum:
+
+1. Connect a device belonging to a denied class.
+2. Confirm that the class is correctly detected.
+3. Confirm that the policy returns `DENY`.
+4. Confirm that the interface is actually deauthorized.
+5. Disconnect and reconnect the device.
+6. Confirm that the persistent monitor catches the newly created interface.
+7. Test composite USB devices.
+8. Test multiple interfaces.
+9. Test devices with misleading product names.
+10. Test permitted devices.
+11. Test malformed or unexpected sysfs values.
+12. Test daemon restart and system reboot.
+13. Confirm that policy enforcement does not unintentionally disable required system hardware.
+
+Testing must distinguish between:
+
+```text
+Detected
+Policy denied
+Deauthorization requested
+Deauthorization succeeded
+```
+
+Those are separate events and should not be treated as equivalent.
+
+---
+
+## 15. Production Security Considerations
+
+A production-grade implementation should also address race conditions during device enumeration and initialization.
+
+There can be a period between physical insertion, kernel enumeration, interface creation, driver binding, and P0 enforcement.
+
+The final design should therefore establish the desired security posture for that interval.
+
+A stronger implementation may eventually integrate with udev or other kernel/device-management mechanisms rather than relying exclusively on periodic polling.
+
+The policy should also define behavior when the guard itself fails.
+
+Possible models include:
+
+```text
+Fail-open
+Fail-closed
+Fail-closed for selected classes
+```
+
+The appropriate choice depends on the operational environment.
+
+For a high-security deployment, this decision must be explicit rather than accidental.
+
+---
+
+## 16. Relationship to P0 Guard Architecture
+
+The PCMCIA/USB Guard provides a physical-interface security layer complementary to the other P0 components.
+
+The overall model becomes:
+
+```text
+                P0 GUARD
+                   |
+       +-----------+-----------+
+       |           |           |
+       v           v           v
+   Application   Network    Peripheral
+   Identity      Sessions    Identity
+       |           |           |
+   Beastmode   Reverse-      USB Class
+               Shell Guard    Guard
+       |           |           |
+       +-----------+-----------+
+                   |
+                   v
+             P0 Enforcement
+```
+
+This layered model is significant because an attacker does not have to attack only one security boundary.
+
+Application controls, network controls, and hardware-interface controls can independently reduce the available attack surface.
+
+---
+
+## 17. Conclusion
+
+The P0 PCMCIA/USB Guard is an early-development security component focused on numeric USB class-code enforcement.
+
+Its current implementation demonstrates a straightforward security primitive:
+
+> Enumerate USB interfaces, read their declared class codes, compare those codes against a P0 policy, and deauthorize interfaces whose classes are prohibited.
+
+The current denied-class policy includes printer (`0x07`), wireless controller (`0xE0`), and vendor-specific (`0xFF`) USB interfaces.
+
+The implementation is not yet a complete peripheral security framework. Its current scope is USB interface-class enforcement through Linux sysfs. Future development can expand the mechanism into a richer device identity and policy system incorporating vendor/product identifiers, serial numbers, subclass/protocol information, composite-device handling, runtime policy management, audit logging, and stronger boot-time enforcement.
+
+The strategic purpose is clear: P0 Guard should not depend exclusively on what software claims a peripheral is. It should have the ability to inspect the lower-level hardware identity exposed by the operating system and enforce security policy against that identity.
