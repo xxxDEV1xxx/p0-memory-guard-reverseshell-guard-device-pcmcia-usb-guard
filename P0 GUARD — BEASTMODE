@@ -1,0 +1,372 @@
+# P0 GUARD — BEASTMODE
+
+## Application Identity Enforcement, Program-Name Blocking, and Memory Crystal Identity Comparison
+
+**Technical Whitepaper 1 of 3**
+
+**Document classification:** Technical Architecture and Implementation
+**System:** P0 Guard — Beastmode
+**Version:** Draft 1.0
+**Date:** October 4, 2026
+
+---
+
+## Abstract
+
+P0 Guard Beastmode is an application-security enforcement concept centered on controlling program execution and evaluating identity claims against expected or trusted identity information. Its primary objectives are to prevent unauthorized programs from executing, identify discrepancies between claimed and expected identities, and establish a basis for security decisions that do not rely exclusively on a program's displayed name or self-reported identity.
+
+The Beastmode implementation described in this paper focuses on three principal areas:
+
+1. **Program-name blocking:** identifying and restricting execution of applications designated as prohibited.
+2. **Identity-claim comparison:** evaluating claimed identity information against a trusted reference to identify inconsistencies, impersonation attempts, or unauthorized substitutions.
+3. **Memory Crystal comparison:** treating Memory Crystal as the named reference component for identity comparison and examining how that reference can contribute to application identification and enforcement.
+
+The central security principle is that an application's declared name and claimed identity are evidence, not proof. Strong enforcement requires comparing those claims with independently obtained information and applying policy at an appropriate operating-system enforcement point.
+
+This paper establishes the Beastmode scope and its intended security model. It distinguishes architectural intent from implementation details that require source-code inspection, testing, or additional technical documentation.
+
+## 1. Scope and Document Organization
+
+P0 Guard is being documented as three separate whitepapers to preserve the distinction between its major security domains.
+
+| Whitepaper | Subject                | Primary focus                                                              |
+| ---------- | ---------------------- | -------------------------------------------------------------------------- |
+| 1          | P0 Guard Beastmode     | Program blocking, identity-claim comparison, Memory Crystal                |
+| 2          | P0 PCMCIA Guard        | Peripheral identity, PCMCIA-related controls, and device-class enforcement |
+| 3          | P0 Reverse-Shell Guard | Reverse-shell detection, prevention, and associated security controls      |
+
+Whitepaper 1 is specifically concerned with application-level enforcement and identity validation. Peripheral-class authorization and reverse-shell functionality are outside its implementation scope, except where they provide relevant architectural context.
+
+The term *Beastmode* refers to the implementation under discussion. It should not be interpreted as evidence of a particular security guarantee, performance level, or resistance to bypass without supporting test results.
+
+## 2. Security Problem
+
+Traditional application controls frequently depend on one or more identifiers: a filename, executable path, process name, publisher, cryptographic hash, or operating-system identity.
+
+Each identifier has limitations.
+
+A filename can be changed. An executable can be copied to another directory. A process can use a misleading name. A program may claim an identity that does not match its actual origin or expected characteristics. Even a valid digital signature establishes only particular facts about the signed artifact; it does not establish that every behavior of the running program is trustworthy.
+
+A security mechanism that relies on a single mutable attribute can therefore make an incorrect authorization decision.
+
+P0 Guard Beastmode addresses this problem through two complementary enforcement objectives:
+
+* Block programs that match a configured prohibition policy.
+* Compare claimed identity information against trusted reference information before relying on that identity for a security decision.
+
+The second objective is particularly important when a security decision depends on whether a program is the expected application, rather than merely whether it presents the expected name.
+
+## 3. Beastmode Architecture
+
+The intended architecture separates identification, policy evaluation, and enforcement.
+
+### 3.1 Identification
+
+The identification stage obtains information about the application or process under evaluation.
+
+Depending on the actual implementation, relevant information may include:
+
+* Process name and executable path.
+* Process identifier and parent process.
+* Executable metadata.
+* Cryptographic file hash.
+* Digital-signature or publisher information.
+* Operating-system process ownership and security context.
+* An identity claim supplied by the application or another component.
+* A reference identity associated with Memory Crystal.
+
+These attributes are not interchangeable. A process name is a label; a cryptographic hash identifies specific file contents; a signature provides information about signing and integrity; and an operating-system security context describes privileges or ownership under the relevant operating system.
+
+The precise set of attributes collected by Beastmode must be established from its implementation.
+
+### 3.2 Policy evaluation
+
+The policy stage determines whether an observed application or identity satisfies the configured rules.
+
+A policy may produce outcomes such as:
+
+* **Deny:** the program matches an explicit blocking rule.
+* **Match:** the observed identity agrees with the trusted reference under the configured comparison criteria.
+* **Mismatch:** the observed identity differs from the expected reference.
+* **Unknown:** the available information is insufficient to make a reliable determination.
+
+A mismatch should not automatically be treated as proof of malicious intent. Legitimate updates, renamed binaries, changed signing certificates, and stale reference data can also produce discrepancies. The enforcement response should depend on policy and the reliability of the comparison.
+
+### 3.3 Enforcement
+
+The enforcement stage applies the result.
+
+Possible enforcement mechanisms include denying process creation, terminating a running process, preventing access to a protected resource, recording an alert, or isolating the application.
+
+These actions have different security properties. A process-termination mechanism, for example, does not prevent the program from starting again. Preventing execution generally requires an enforcement mechanism that operates before or during process creation.
+
+The actual Beastmode enforcement point must be verified before the implementation can be described as providing pre-execution prevention.
+
+## 4. Program Blocking by Name
+
+Program-name blocking is the first major capability addressed by Beastmode.
+
+A configured policy identifies program names that are not permitted. When an application matches a prohibited name, the guard applies the configured response.
+
+### 4.1 Operational model
+
+The conceptual sequence is:
+
+1. Observe a process or an attempted application launch.
+2. Obtain its relevant name or executable identifier.
+3. Normalize the observed value according to defined comparison rules.
+4. Compare it with the configured block policy.
+5. Apply the associated enforcement action.
+6. Record the result for auditing and troubleshooting.
+
+A production implementation must define whether matching is case-sensitive, whether executable paths are considered, how symbolic links are handled, and whether the comparison is performed against a process name, an executable filename, or a canonical executable path.
+
+### 4.2 Limitations of name-only enforcement
+
+Name-based rules are useful for straightforward policy enforcement, but they are not sufficient as a standalone identity-verification mechanism.
+
+For example, two different executables can have the same filename. A prohibited application may also be renamed. Depending on the operating system and the observation mechanism, the reported process name may not uniquely identify the executable that is running.
+
+Accordingly, program-name blocking should be treated as a policy layer rather than a complete proof of executable identity.
+
+### 4.3 Recommended validation
+
+The Beastmode test plan should verify:
+
+* A program with a prohibited name is blocked as intended.
+* An unrelated program is not blocked because of an ambiguous match.
+* Renaming a prohibited executable does not silently defeat any stronger identity rule that is intended to protect against renaming.
+* A process that changes its displayed name does not bypass the actual enforcement mechanism.
+* Every block decision produces a sufficiently detailed audit record.
+
+These are validation requirements, not claims that every test has already passed.
+
+## 5. Identity-Claim Comparison
+
+Identity-claim comparison is the second major capability.
+
+The mechanism evaluates an identity asserted by an application or observed by a security component against an expected identity obtained from a reference source.
+
+The fundamental comparison is:
+
+**Claimed identity versus independently established reference identity.**
+
+If the comparison fails, the guard identifies a discrepancy and applies the configured mismatch policy.
+
+### 5.1 Identity attributes
+
+The identity model should explicitly identify which attributes are compared.
+
+Potential attributes include:
+
+* Application name.
+* Executable path.
+* Cryptographic hash.
+* Publisher or certificate identity.
+* Process ownership and security context.
+* Product or component identifier.
+* A trusted application identifier recorded in the reference system.
+
+The strength of the result depends on the attributes selected, their provenance, and the ability of an untrusted program to manipulate them.
+
+A comparison of two self-reported names provides weaker assurance than a comparison involving independently measured executable contents and a trusted reference.
+
+### 5.2 Expected identity and claimed identity
+
+A claim is a statement about identity. A reference is the information against which that statement is evaluated.
+
+For a meaningful security decision, the reference should not simply repeat the same unverified claim. Otherwise, the comparison can become circular: the program supplies an identity, and the guard accepts that identity because the reference was derived from the same source.
+
+A robust design therefore documents:
+
+1. Who or what establishes the reference identity.
+2. How the reference is protected against unauthorized modification.
+3. Which attributes are compared.
+4. How missing, stale, or conflicting reference data is handled.
+5. What action follows a mismatch.
+
+### 5.3 Mismatch classification
+
+A mismatch can result from several causes, including an altered executable, a substituted binary, a misleading name, an unexpected application version, or an invalid or outdated reference.
+
+The guard should preserve the distinction between detecting a mismatch and proving an attack.
+
+A useful classification model includes:
+
+* **Confirmed policy violation:** an explicit rule is violated.
+* **Identity mismatch:** observed attributes differ from the trusted reference.
+* **Unverifiable identity:** the required evidence is unavailable.
+* **Reference inconsistency:** the reference itself is conflicting or cannot be trusted.
+
+This model allows the enforcement policy to be strict without incorrectly claiming that every discrepancy is malicious.
+
+## 6. Memory Crystal
+
+Memory Crystal is the named reference component associated with identity comparison in the Beastmode design.
+
+Its precise data model, storage mechanism, trust boundary, and comparison implementation must be established from the relevant source code and technical documentation. This paper does not assume that Memory Crystal is a particular database, kernel subsystem, cryptographic system, or memory-protection technology.
+
+### 6.1 Role in the security model
+
+Within the architecture described here, Memory Crystal is examined as the reference against which an identity claim can be evaluated.
+
+The intended relationship is:
+
+1. An application or security observation supplies identity information.
+2. The comparison mechanism obtains the corresponding reference information.
+3. The guard evaluates the claim against that reference.
+4. A matching result or mismatch is produced.
+5. The applicable Beastmode policy determines the response.
+
+This model is useful only to the extent that the reference is sufficiently trustworthy and independent of the claim being checked.
+
+### 6.2 Reference integrity
+
+The security value of Memory Crystal depends on how its reference information is established and protected.
+
+Questions requiring implementation-level answers include:
+
+* Is reference information created during enrollment, installation, or runtime observation?
+* Is it stored in a file, a database, process memory, or another subsystem?
+* Can an ordinary application modify it?
+* Is reference data cryptographically authenticated?
+* How are application updates and legitimate identity changes handled?
+* What happens when the reference is absent or corrupted?
+* Can a privileged attacker alter both the application and the reference?
+
+These questions define the difference between a comparison mechanism and a trustworthy identity-verification system.
+
+### 6.3 Comparison outcomes
+
+A Memory Crystal comparison should produce an explicit, auditable result.
+
+At minimum, the design should distinguish a successful match from a mismatch and from an inconclusive comparison. An inability to retrieve a reference must not silently be represented as a successful match.
+
+The enforcement policy can then determine whether an inconclusive result causes a denial, an alert, or a restricted mode of operation.
+
+### 6.4 What can be claimed
+
+Until the underlying implementation has been examined, the defensible description is that Memory Crystal serves as the named identity-comparison reference in the Beastmode design.
+
+Claims of tamper-proof storage, hardware-backed identity, memory integrity enforcement, or resistance to kernel-level compromise require additional evidence and should not be inferred from the name alone.
+
+## 7. Policy Precedence and Fail-Safe Behavior
+
+The interaction between program-name blocking and identity comparison must be explicit.
+
+A recommended policy order is:
+
+1. Apply mandatory deny rules.
+2. Obtain the identity evidence required by the policy.
+3. Compare the observed identity with the trusted reference.
+4. Handle missing or inconsistent evidence according to the configured failure policy.
+5. Record the decision and its reason.
+
+An identity match should not override an explicit prohibition unless the policy deliberately defines such an exception.
+
+Likewise, an application should not be considered authorized merely because its name matches an approved entry.
+
+The guard should avoid ambiguous outcomes in which two policy mechanisms disagree and the final decision depends on undocumented execution order.
+
+## 8. Auditability and Operational Visibility
+
+A security enforcement mechanism needs evidence of what it observed and why it acted.
+
+For each relevant decision, an audit record should ideally include:
+
+* Timestamp.
+* Process identifier, where available.
+* Observed process name and executable path.
+* Identity attributes actually compared.
+* Reference identifier or version.
+* Policy rule responsible for the decision.
+* Comparison outcome.
+* Enforcement action attempted.
+* Enforcement action result.
+* Any error that prevented reliable evaluation.
+
+Audit logs should not expose unnecessary sensitive information. Access controls, retention rules, and protection against log tampering should be part of the operational design.
+
+The existence of an audit message alone does not prove that enforcement succeeded. A complete record distinguishes a denial decision from a successfully enforced denial.
+
+## 9. Threat Model and Limitations
+
+Beastmode's security properties depend on the operating-system integration and the trustworthiness of its inputs.
+
+Relevant threats include:
+
+* Applications that change their names or paths.
+* Executables substituted under an expected filename.
+* Forged or inconsistent identity claims.
+* Modification of local policy or reference data.
+* Attempts to disable or interfere with the guard.
+* Race conditions between identification and enforcement.
+* Privileged attackers who can modify the operating system or guard itself.
+* Legitimate application updates that invalidate stored reference information.
+
+No single identity attribute addresses all these threats.
+
+Name matching can identify prohibited labels. Hash comparison can identify differences in file contents. Signature validation can establish facts about signed artifacts. Process-creation enforcement can prevent execution before a process becomes active. These mechanisms address different parts of the problem and should not be presented as equivalent.
+
+The security boundary must also be stated explicitly. A userspace guard may provide useful protection against ordinary applications while remaining vulnerable to an attacker with sufficient privileges to terminate it, replace its files, or modify the underlying operating system.
+
+Whether Beastmode has protections against these actions is an implementation-specific question.
+
+## 10. Verification Plan
+
+Before declaring the implementation production-validated, the following evidence should be collected.
+
+| Test area                | Required evidence                                                                              |
+| ------------------------ | ---------------------------------------------------------------------------------------------- |
+| Name-based blocking      | Demonstration that configured prohibited programs are blocked                                  |
+| False-positive handling  | Approved programs with similar names are handled correctly                                     |
+| Identity comparison      | Known matching and mismatching identity cases produce expected results                         |
+| Memory Crystal integrity | Unauthorized changes to reference information are detected or prevented, as designed           |
+| Missing reference        | Missing or unreadable reference data produces the documented outcome                           |
+| Enforcement timing       | Evidence establishes whether denial occurs before execution, during execution, or after launch |
+| Policy precedence        | Conflicting rules produce deterministic outcomes                                               |
+| Audit logging            | Logs accurately record both decisions and enforcement results                                  |
+| Recovery                 | Restart, update, and recovery behavior preserve the intended policy                            |
+| Privilege boundary       | Tests establish what an unprivileged or privileged attacker can bypass                         |
+
+Each test should record the operating-system version, guard version, configuration, test procedure, observed result, and pass/fail status.
+
+A claim of successful validation should be made only after the corresponding test evidence exists.
+
+## 11. Deployment and Maintenance Considerations
+
+A production deployment should define how the guard is installed, started, updated, and recovered.
+
+Policy and reference changes should be authenticated and auditable. Updates should preserve the distinction between approved identity changes and unexplained discrepancies. Administrators should be able to determine whether the guard is running and whether it is actively enforcing the intended rules.
+
+The deployment procedure should also address the possibility that a policy update prevents a legitimate application from running. A controlled recovery procedure is necessary, but it should not provide an unaudited bypass of mandatory restrictions.
+
+Where the guard is intended to resist privileged interference, that requirement must be addressed through an enforcement boundary and system configuration capable of supporting it. A userspace process alone should not be assumed to provide that guarantee.
+
+## 12. Relationship to the Remaining P0 Whitepapers
+
+### Whitepaper 2 — P0 PCMCIA Guard
+
+The second whitepaper will cover the peripheral-security domain, including PCMCIA-related device controls and the associated USB or device-class authorization mechanisms. It will document the device identity model, policy evaluation, enforcement path, and operational limitations independently of the Beastmode application controls.
+
+### Whitepaper 3 — P0 Reverse-Shell Guard
+
+The third whitepaper will cover reverse-shell-related detection and prevention. Its scope will include the relevant threat model, detection signals, enforcement strategy, and evidence required to distinguish prevention from post-event detection.
+
+Neither domain should be treated as an implemented Beastmode capability merely because it belongs to the broader P0 project.
+
+## 13. Conclusion
+
+P0 Guard Beastmode is framed around a central application-security principle: an application should not be trusted solely because of the name it presents or the identity it claims.
+
+Program-name blocking supplies a direct policy mechanism for prohibited applications. Identity-claim comparison provides a separate means of detecting discrepancies between observed claims and trusted reference information. Memory Crystal is the named reference component associated with this comparison in the design described by this paper.
+
+The strength of the resulting security control depends on how identity evidence is collected, how reference information is protected, where policy is enforced, and whether enforcement outcomes are independently verifiable.
+
+This whitepaper establishes the scope and evaluation criteria for Beastmode. Implementation-specific claims should be finalized against the relevant source code, runtime behavior, and test evidence before this draft is designated a verified implementation specification.
+
+---
+
+**End of Whitepaper 1 — P0 Guard Beastmode**
+
+*Companion documents: Whitepaper 2 — P0 PCMCIA Guard; Whitepaper 3 — P0 Reverse-Shell Guard.*
