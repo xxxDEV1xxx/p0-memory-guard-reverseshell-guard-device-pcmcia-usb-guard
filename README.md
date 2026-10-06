@@ -29,6 +29,9 @@ pcmciaguard-.tar.gz
 p0-firewall-recreation.tar.gz
 170a0e48451abde18694180c18f7c94e5237d9afc350d92f064ed6feb58c0f15
 
+P0-transform-clean.tar
+f60df08767cab33469b73a749ec250ff56b8294b6729fc9836c91668683f65f3  
+
 
 "If you make an iso of your OS,  burn it to CD.
 If you burn it to CD, dd if=/dev/sd0 of=/dev/sda1 conv=noerror,sync status=progress and burn it to a drive.
