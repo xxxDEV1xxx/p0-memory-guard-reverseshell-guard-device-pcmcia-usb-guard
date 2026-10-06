@@ -1,0 +1,785 @@
+P0 Transform Signature
+xxxDEV1xxx
+xxxDEV1xxx
+12 min read
+·
+3 hours ago
+Behavioral Detection and Final-Operation Enforcement for Persistent Data Transformation
+
+Author: Christopher T. Williams
+P0 Transform Signature
+Behavioral Detection and Final-Operation Enforcement for Persistent Data Transformation
+Abstract
+
+Persistent data transformation presents a difficult detection problem because the malicious operation is not necessarily defined by a single system call, executable, library, or cryptographic primitive. A process may read a file, transform its contents in memory, write a replacement representation, and atomically replace the original file. The individual operations are commonplace. Their temporal and data-flow relationship is not.
+
+This paper presents P0 Transform Signature, a behavioral detection and enforcement system designed to identify file-transformation transactions from their runtime structure rather than relying primarily on process identity, filenames, cryptographic hashes, or a single filesystem primitive.
+
+The system establishes a per-process transaction state when a file is read. A userspace structural detector identifies execution exhibiting a characteristic load-transform-store relationship, including memory-load, data-flow transformation, memory-store, and same-memory-expression characteristics. A structural hit then enters a signature/identity phase. Verified allowlisted signatures may proceed. A non-allowlisted structural hit arms a kernel-resident FLAG_DATA_MANIPULATION state.
+
+Enforcement occurs at the final filesystem operation associated with the transaction. The kernel correlates the operation against the previously observed target inode and, for replacement operations, the target parent directory and destination name. A matching final operation returns -EACCES and emits a compact ring-buffer event containing the transaction context.
+
+The resulting model separates behavioral detection from identity attribution:
+
+runtime behavior
+      |
+      v
+structural transformation
+      |
+      v
+behavioral gate
+      |
+      v
+signature / identity resolution
+      |
+      +---- allowlisted ------> permit
+      |
+      +---- not allowlisted --> arm
+                                  |
+                                  v
+                           final operation
+                                  |
+                             -EACCES + event
+
+The approach is intended to address transformation behavior that can vary in implementation language, executable identity, library usage, and cryptographic algorithm while preserving the ability to attribute known implementations when sufficient signature information is available.
+1. Introduction
+
+Traditional file-integrity and ransomware defenses frequently rely on indicators such as:
+
+    known malicious binaries;
+    process names;
+    executable hashes;
+    known cryptographic APIs;
+    unusually high write rates;
+    filename extensions;
+    entropy changes;
+    large numbers of filesystem modifications.
+
+These mechanisms remain useful, but each describes only part of the transformation problem.
+
+A transformation can be implemented in C, C++, Python, Perl, shell tooling, a shared library, or a custom runtime. It may use a recognizable cryptographic primitive, a trivial substitution cipher, or a transformation that is not represented in a cryptographic catalog at all.
+
+Likewise, a malicious implementation can deliberately avoid a particular write primitive. A process can write directly to an existing file, create a temporary replacement, or use a rename-based replacement transaction.
+
+P0 Transform Signature therefore treats the transformation transaction itself as the primary object of detection.
+
+The central premise is:
+
+    The security decision should be based first on what the process is structurally doing to file-backed data, and only second on what executable, function, library, or algorithm appears to be responsible.
+
+This distinction is important. Identity is useful for attribution and policy. Behavior establishes whether the operation belongs to the protected transformation class.
+2. Design Objective
+
+The objective is to detect and stop a process when its execution establishes the characteristic structure of persistent file transformation.
+
+The system does not attempt to prohibit cryptographic computation in general.
+
+A process may legitimately perform:
+
+encryption
+decryption
+hashing
+encoding
+compression
+key generation
+TLS operations
+database cryptography
+
+without modifying persistent files.
+
+The protected condition is instead the relationship between:
+
+file-backed data acquisition
+        +
+in-memory transformation
+        +
+persistent replacement
+
+This produces the fundamental architectural separation:
+
+cryptographic activity
+        !=
+file transformation
+
+The detector is interested in the latter.
+3. Threat Model
+
+The target threat is a process that transforms persistent file contents and subsequently commits the transformed representation to storage.
+
+Examples include:
+
+    ransomware-style file encryption;
+    bulk file substitution;
+    custom substitution or transposition transformations;
+    content rewriting performed through scripting languages;
+    malicious use of legitimate transformation libraries;
+    custom implementations that do not correspond to a known cryptographic catalog entry.
+
+The model does not assume that the attacker uses a particular executable.
+
+It also does not assume that the attacker uses a particular write syscall.
+
+This is significant because static identification and syscall-specific blocking are both susceptible to implementation variation.
+4. Core Behavioral Model
+
+The system models a transformation as a transaction.
+
+At minimum, the transaction establishes:
+
+READ TARGET
+     |
+     v
+TRANSFORMATION
+     |
+     v
+FINAL PERSISTENT OPERATION
+
+The kernel maintains per-PID state containing:
+
+flags
+target device
+target inode
+target parent device
+target parent inode
+target name
+read_count
+final_count
+final_latch
+
+Two behavioral flags currently define the primary state:
+
+FLAG_TARGET_READ       = 1 << 0
+FLAG_DATA_MANIPULATION = 1 << 1
+
+The state therefore progresses from:
+
+0x0
+
+to:
+
+0x1
+
+when the target is read, and then:
+
+0x3
+
+when the structural detector determines that transformation behavior has occurred.
+
+The final operation is denied only when the transaction satisfies the complete behavioral condition.
+5. Structural Detection
+
+The structural detector examines runtime execution rather than merely identifying the process.
+
+The current structural signature is organized around four characteristics:
+
+memory-load
+dataflow-transform
+memory-store
+same-memory-expression
+
+The conceptual behavior is:
+
+load data
+   |
+   v
+transform data
+   |
+   v
+store transformed data
+
+The same-memory relationship is particularly important because it distinguishes data transformation from arbitrary computation.
+
+The detector operates against executable runtime targets and observes execution of functions/instructions exhibiting the structural characteristics.
+
+The structural catalog currently contains hundreds of identified structural candidates across the installed library environment.
+
+The catalog is not itself the security boundary.
+
+It provides the runtime targets through which structural execution can be observed and subsequently provides attribution information.
+6. Structural Detection Versus Identity
+
+A fundamental design property is that inventory coverage does not determine whether structural detection occurs conceptually.
+
+Consider an implementation in an executable that is absent from the current identity catalog.
+
+Its absence means:
+
+identity = unknown
+
+It does not mean:
+
+behavior = harmless
+
+This distinction is essential for unknown implementations.
+
+The intended decision model is:
+
+structural hit
+      |
+      v
+identity resolution
+      |
+      +-- verified allowlist match --> permit
+      |
+      +-- no verified match --------> block path
+
+Therefore, the catalog answers:
+
+    What implementation appears to have produced this behavior?
+
+The structural detector answers:
+
+    Is this process performing the protected transformation behavior?
+
+The two questions are deliberately separated.
+7. Signature and Allowlist Phase
+
+After a structural hit, the system performs signature resolution.
+
+The current allowlist accepts only verified PERMIT entries.
+
+Matching can incorporate implementation identity and structural signature constraints such as:
+
+binary
+library
+function
+file offset
+catalog address
+assembly SHA-256
+
+The signature is therefore an attribution mechanism and policy mechanism.
+
+For example, a known implementation can be permitted after its runtime behavior matches a verified catalog entry.
+
+An unrecognized implementation does not receive the same exception merely because it performs a structurally similar operation.
+
+This produces a conservative security boundary:
+
+known + verified + allowlisted
+        |
+        v
+      PERMIT
+
+structurally transforming + not allowlisted
+        |
+        v
+       ARM
+        |
+        v
+FINAL GATE
+
+8. Kernel Behavioral State
+
+The kernel maintains the transformation state in an LRU hash map keyed by process ID.
+
+The current state object is 136 bytes.
+
+The state records the identity of the file involved in the transaction rather than merely remembering that a process performed a read.
+
+The target is represented by:
+
+device
+inode
+
+and the replacement context additionally records:
+
+parent device
+parent inode
+destination name
+
+This permits the final operation to be correlated with the original transaction.
+
+A new read establishes the current target when no transformation has yet been armed.
+
+Once the manipulation flag is set, the kernel does not silently replace the transaction underneath the armed state.
+
+This preserves the relationship between:
+
+read target
+
+and:
+
+final replacement
+
+9. Userspace-to-Kernel Transition
+
+The userspace classifier does not invent the read state.
+
+The kernel establishes:
+
+FLAG_TARGET_READ
+
+when the process accesses the file through the relevant read path.
+
+The structural detector subsequently determines that the process has exhibited the transformation structure.
+
+Only then does userspace set:
+
+FLAG_DATA_MANIPULATION
+
+The transition is therefore:
+
+kernel:
+    READ
+      |
+      v
+    flags = 0x1
+
+userspace:
+    STRUCTURAL HIT
+      |
+      v
+    flags = 0x3
+kernel:
+    FINAL OPERATION
+      |
+      v
+    enforce
+
+This division of responsibility prevents the userspace detector from fabricating the initial filesystem relationship.
+10. Final-Operation Enforcement
+
+The final enforcement point is intentionally downstream of behavioral classification.
+
+The current kernel enforcement hooks are:
+
+lsm/file_permission
+lsm/inode_rename
+
+The final operation is checked against the transaction state.
+
+For a matching final condition, the BPF program executes:
+
+return -EACCES;
+
+The calling process consequently receives:
+
+Permission denied
+
+The system does not kill the entire process merely because it performed a transformation-related operation.
+
+It also does not impose a generic PID-wide write prohibition.
+
+The enforcement decision is transaction-specific.
+11. Replacement Rename Enforcement
+
+Replacement-style transformations are particularly important because many applications do not overwrite the original file in place.
+
+Instead they use a sequence conceptually similar to:
+
+read original
+     |
+     v
+create temporary replacement
+     |
+     v
+write transformed content
+     |
+     v
+rename temporary -> original
+
+The rename operation is the commit point.
+Become a Medium member
+
+The inode_rename hook verifies:
+
+target parent device
+target parent inode
+destination name
+
+against the transaction established during the earlier read.
+
+If the transaction has already been structurally armed, the matching rename becomes the enforcement point.
+
+This provides an important property:
+
+    The system can allow intermediate computation while preventing the persistent replacement from being committed.
+
+12. Final Latch
+
+The kernel uses a final-operation latch to prevent repeated enforcement events for the same transaction.
+
+Conceptually:
+
+old_latch = __sync_fetch_and_or(&st->final_latch, 1ULL);
+
+if (old_latch & 1ULL)
+    return 0;
+
+The first matching final operation therefore becomes the transaction’s enforcement event.
+
+The state records:
+
+final_count
+final_latch
+
+This provides both enforcement semantics and transaction observability.
+13. Ring-Buffer Evidence
+
+A blocked transaction is emitted through a BPF ring buffer.
+
+The current event contains:
+
+pid
+uid
+flags
+match
+target device
+target inode
+parent device
+parent inode
+read_count
+final_count
+comm
+
+An example event is:
+
+[p0-transform-systemwide] BLOCKED
+pid=11668
+uid=0
+comm=python3
+operation=final-transform
+match=1
+flags=0x3
+target_dev=8388610
+target_ino=1442046
+parent_dev=8388610
+parent_ino=1441896
+read_count=173
+final_count=1
+
+The event is intentionally compact.
+
+Detailed forensic evidence is reserved for verbose operation so that normal enforcement does not continuously consume storage.
+14. Observed Implementation Behavior
+
+The system has been exercised against transformations implemented in multiple environments.
+
+A common transformation was performed using:
+
+sed
+Perl
+Python
+
+The transformation itself was intentionally simple: a one-position alphabet substitution.
+
+For example:
+
+hello world
+
+becomes:
+
+ifmmp xpsme
+
+The important result is not the cipher.
+
+The important result is that different implementations can express equivalent file-transformation behavior through different runtime stacks.
+
+Perl, for example, was observed using a replacement workflow of the form:
+
+open original
+read original
+open temporary
+write temporary
+rename temporary -> original
+
+This demonstrates why a single write primitive is insufficient as the defining behavioral signature.
+15. Why the Write Primitive Is Not the Signature
+
+Different implementations use different filesystem primitives.
+
+Observed imports include combinations of:
+
+write
+fwrite
+fwrite_unlocked
+pwrite64
+writev
+pwritev64v2
+rename
+renameat
+open64
+openat64
+
+Consequently, a detector based exclusively on one function such as:
+
+write()
+
+would not describe the complete transformation class.
+
+The same applies to:
+
+rename()
+
+as a universal detector.
+
+Rename is highly valuable as a final enforcement point for replacement-style transformations, but it does not by itself establish that the preceding data was transformed.
+
+The security signal is the transaction:
+
+read target
++
+transform target data
++
+commit transformed representation
+
+16. Language Independence
+
+The structural model is intended to remain independent of the implementation language.
+
+A transformation written in:
+
+C
+C++
+Python
+Perl
+shell tooling
+
+may produce different call graphs and different filesystem syscalls while still expressing the same underlying operation.
+
+The system therefore attempts to identify the invariant behavioral structure rather than requiring a language-specific rule for each implementation.
+
+Where a language/runtime does not yet have complete attribution coverage, it remains an identity-resolution problem rather than a justification for ignoring the structural behavior.
+17. Intermittent and Adaptive Behavior
+
+A transformation detector cannot safely assume that malicious behavior will occur continuously.
+
+An adversary may:
+
+    transform files intermittently;
+    pause between transactions;
+    vary the target set;
+    alter the implementation;
+    change the cryptographic primitive;
+    use multiple processes;
+    attempt to mimic known software.
+
+Therefore, the long-term objective is not simply:
+
+this happened multiple times
+
+but:
+
+what is normal for this process/system?
+what target set does it normally operate on?
+what cadence is normal?
+what execution lineage is normal?
+what transformation structures are normal?
+what signature is normally associated with that behavior?
+
+The current implementation establishes the structural and signature foundations required for this later behavioral baseline.
+18. Systemwide Operation
+
+The systemwide classifier observes processes rather than requiring a manually selected PID.
+
+Its process loop discovers active processes and examines runtime structural candidates associated with their executable mappings.
+
+The conceptual flow is:
+
+system processes
+      |
+      v
+runtime executable mappings
+      |
+      v
+structural candidate targets
+      |
+      v
+runtime observation
+      |
+      v
+STRUCTURAL HIT
+
+Once a process produces the structural event, it enters the signature decision phase.
+
+This allows the structural rule to operate across implementations rather than requiring a separate manually configured process policy.
+19. Current Enforcement Architecture
+
+The current implementation is composed of three functional layers.
+Layer 1 — Runtime observation
+
+The structural observer identifies execution corresponding to the transformation structure.
+Layer 2 — Userspace decision
+
+The systemwide classifier determines whether the structural event corresponds to a verified allowlisted signature.
+Layer 3 — Kernel final gate
+
+The BPF LSM state machine correlates the armed process with the final filesystem operation and denies the matching transaction.
+
+The resulting separation is:
+
+OBSERVE
+   |
+   v
+CLASSIFY
+   |
+   v
+ARM
+   |
+   v
+ENFORCE
+
+20. Safety Property
+
+One of the central safety properties of the design is that the structural detector does not itself cause an immediate generic process termination.
+
+Instead:
+
+structural hit
+      |
+      v
+allowlist decision
+      |
+      v
+arm transaction
+      |
+      v
+final matching operation
+      |
+      v
+-EACCES
+
+This reduces the enforcement scope.
+
+A process can perform unrelated computation after classification. The protected transaction is blocked when it attempts to commit the transformation to the recorded target.
+21. Observability and Forensics
+
+The enforcement event provides enough information to establish a basic transaction relationship:
+
+which process?
+which target inode?
+which parent?
+how many reads?
+which final operation count?
+what behavioral flags were active?
+
+This provides a foundation for forensic reconstruction.
+
+Future verbose evidence can extend the transaction with information such as:
+
+source operation
+target operation
+target pathname
+runtime library
+runtime function
+instruction offset
+assembly signature
+process lineage
+
+The normal enforcement stream should remain compact, while detailed evidence is enabled explicitly for investigation.
+22. Current Limitations
+
+The current implementation has several known limitations.
+
+First, the current final write hook does not reliably intercept every possible later write(2) sequence. A direct test using an already-open/truncated file was able to complete without triggering the current file_permission(MAY_WRITE) final gate.
+
+The replacement rename path is currently the validated final enforcement path.
+
+Second, the current ring-buffer event does not contain an explicit operation discriminator. The userspace event therefore reports:
+
+operation=final-transform
+
+rather than claiming that every event is specifically a rename or specifically a write.
+
+Third, identity catalog coverage is not yet universal. This does not invalidate structural detection, but it limits attribution of an otherwise valid structural event.
+
+Fourth, the current structural target catalog is based on the installed executable/library environment and therefore represents the current coverage boundary.
+
+Fifth, the current implementation is a foundational behavioral enforcement layer. It does not yet constitute the complete adaptive heuristics engine envisioned for later phases.
+23. Future Development
+
+The next stages of development can build on the established transaction model.
+
+Potential extensions include:
+Expanded operation attribution
+
+Add an explicit operation field to the BPF event so that the system can distinguish:
+
+WRITE
+RENAME
+OTHER_FINAL_OPERATION
+
+without inferring the operation from context.
+Broader final-operation coverage
+
+Extend the final gate to additional filesystem commit mechanisms while preserving the same transaction state model.
+Expanded implementation catalog
+
+Continue mapping installed binaries and libraries to their structural transformation signatures.
+Behavioral variance
+
+Record Stage 4 variance/invariant information while retaining large raw Stage 2/3 evidence separately.
+Adaptive heuristics
+
+For verified signatures that are permitted, build a behavioral model covering:
+
+process lineage
+target population
+cadence
+file types
+directory scope
+operation ordering
+transformation frequency
+
+A known algorithm should not automatically imply trusted behavior.
+
+The algorithm’s observed behavior remains subject to contextual analysis.
+24. Security Model
+
+The resulting security model can be summarized as:
+
+IDENTITY IS NOT BEHAVIOR
+BEHAVIOR IS NOT IDENTITY
+
+A trusted executable can exhibit suspicious transformation behavior.
+
+An unknown executable can exhibit legitimate transformation behavior.
+
+The system therefore separates:
+
+behavioral classification
+
+from:
+
+identity attribution
+
+and uses the combination for policy.
+
+The primary security boundary is the structural transformation event.
+
+The signature catalog supplies the information necessary to recognize verified exceptions.
+25. Conclusion
+
+P0 Transform Signature approaches persistent data transformation as a behavioral transaction rather than as a single cryptographic API call or filesystem syscall.
+
+The system establishes a target when data is read, identifies transformation structure in runtime execution, resolves the observed behavior against a verified signature/allowlist, and, when the behavior is not permitted, arms a per-process kernel state.
+
+The final persistent operation is then correlated against the recorded transaction.
+
+For replacement-style transformations, the rename operation provides a particularly effective commit boundary:
+
+READ
+  |
+  v
+TRANSFORM
+  |
+  v
+TEMPORARY OUTPUT
+  |
+  v
+RENAME -> ORIGINAL
+  |
+  X
+-EACCES
+
+The resulting enforcement mechanism is deliberately narrower than a process-wide kill or write prohibition.
+
+It does not attempt to prevent cryptographic computation.
+
+It prevents an unapproved structurally identified transformation from committing its result to the protected file transaction.
+
+The demonstrated behavior across Python and Perl, together with the validated rename-based enforcement path and ring-buffer evidence channel, establishes the foundation for a broader systemwide transformation-defense framework.
+
+The central design principle is therefore:
+
+    Detect the structure of the transformation first. Resolve its identity second. Permit only verified behavior. When an unapproved transformation reaches the persistent commit point, stop the transaction rather than merely identifying the process.
