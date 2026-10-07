@@ -1,4 +1,38 @@
+#create memory crystal 
+cd /data/p0BUILDSOURCE/crystal-acquisition
 
+python3 inventory_executables.py \
+    --paths \
+    /bin \
+    /sbin \
+    /usr/bin \
+    /usr/sbin \
+    /usr/local/bin \
+    /usr/local/sbin \
+    /lib \
+    /lib64 \
+    /usr/lib \
+    /usr/lib64 \
+    /data/bin \
+    /data/sbin \
+    /data/usr/bin \
+    /data/usr/sbin \
+    /data/usr/local/bin \
+    /data/usr/local/sbin \
+    /data/lib \
+    /data/lib64 \
+    /data/usr/lib \
+    /data/usr/lib64 \
+    /data/opt \
+    /data/opt/bin \
+    /data/opt/sbin \
+    /data/opt/usr/bin \
+    /data/opt/usr/sbin
+
+python3 build_acquisition_manifest.py
+cd /data/p0BUILDSOURCE/memory-crystal
+python3 process_baseline.py
+##############
 systemctl start p0-memory-identity-beastmode.service
 systemctl status p0-memory-identity-beastmode.service --no-pager
 journalctl -u p0-memory-identity-beastmode.service -n 10 --no-pager
