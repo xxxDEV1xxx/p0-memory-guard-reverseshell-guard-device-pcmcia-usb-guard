@@ -1,0 +1,426 @@
+# Copyright (c) 2026 Christopher T. Williams
+#
+# License
+# Permission is granted to use, copy, modify, and distribute this software
+# solely for non-commercial research, testing, and security-analysis purposes,
+# provided that the copyright notice and this license remain intact.
+#
+# Sale, commercial use, or commercial distribution is prohibited without
+# prior written permission from Christopher Thomas Williams.
+
+time curl -sS -N \
+  --max-time 120 \
+  http://127.0.0.1:11434/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"qwen2.5:1.5b",
+    "messages":[
+      {"role":"system","content":"You are Odysseus."},
+      {"role":"user","content":"Reply with exactly: OK"}
+    ],
+    "stream":true,
+    "think":false,
+    "keep_alive":"30m",
+    "options":{
+      "num_ctx":8192,
+      "num_predict":3,
+      "num_thread":3,
+      "num_batch":8192
+    }
+  }'
+echo
+
+
+
+############################
+install this CPU tuner first
+############################
+cd /data/sda4/odysseus
+
+mkdir -p tools
+
+cat > tools/llm_cpu_governor.py <<'PY'
+#!/usr/bin/env python3
+
+import json
+import os
+import signal
+import time
+from pathlib import Path
+
+STATE_FILE = Path("/run/odysseus-llm-cpu/state.json")
+
+ACTIVE_PCT = 99
+THERMAL_PCT = 50
+IDLE_PCT = 5
+
+THERMAL_HIGH_MC = 95_000
+THERMAL_RECOVER_MC = 90_000
+
+POLL_S = 0.50
+
+_running = True
+_saved = {}
+
+
+def log(msg):
+    print(f"[llm-cpu] {msg}", flush=True)
+
+
+def read(path):
+    try:
+        return Path(path).read_text().strip()
+    except Exception:
+        return None
+
+
+def write(path, value):
+    try:
+        Path(path).write_text(str(value))
+        return True
+    except Exception as e:
+        log(f"write failed {path}: {e}")
+        return False
+
+
+def parse_cpu_list(value):
+    out = set()
+    for part in (value or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            out.update(range(int(a), int(b) + 1))
+        else:
+            out.add(int(part))
+    return sorted(out)
+
+
+def online_cpus():
+    return parse_cpu_list(read("/sys/devices/system/cpu/online") or "")
+
+
+def proc_stat(pid):
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().split()
+        return int(fields[13]) + int(fields[14])
+    except Exception:
+        return None
+
+
+def proc_comm(pid):
+    try:
+        return read(f"/proc/{pid}/comm") or ""
+    except Exception:
+        return ""
+
+
+def ollama_pids():
+    found = []
+
+    try:
+        for item in os.listdir("/proc"):
+            if not item.isdigit():
+                continue
+
+            comm = proc_comm(item).strip().lower()
+
+            if comm in {
+                "ollama",
+                "llama-server",
+                "runner",
+            } or "llama" in comm:
+                found.append(int(item))
+    except Exception:
+        pass
+
+    return found
+
+
+def thermal_max():
+    maximum = None
+
+    for zone in Path("/sys/class/thermal").glob("thermal_zone*"):
+        raw = read(zone / "temp")
+        if raw is None:
+            continue
+
+        try:
+            temp = int(raw)
+        except ValueError:
+            continue
+
+        # Ignore obviously invalid sensor values.
+        if temp < -20_000 or temp > 150_000:
+            continue
+
+        if maximum is None or temp > maximum:
+            maximum = temp
+
+    return maximum
+
+
+def pstate_percent_path():
+    candidates = [
+        "/sys/devices/system/cpu/intel_pstate/max_perf_pct",
+        "/sys/devices/system/cpu/amd_pstate/max_perf_pct",
+    ]
+
+    for path in candidates:
+        if os.path.exists(path) and os.access(path, os.W_OK):
+            return path
+
+    return None
+
+
+def cpu_freq_paths(cpus):
+    paths = []
+
+    for cpu in cpus:
+        base = Path(f"/sys/devices/system/cpu/cpu{cpu}/cpufreq")
+        if not base.exists():
+            continue
+
+        maximum = base / "scaling_max_freq"
+        minimum = base / "cpuinfo_min_freq"
+        info_max = base / "cpuinfo_max_freq"
+        governor = base / "scaling_governor"
+
+        if maximum.exists() and info_max.exists():
+            paths.append({
+                "cpu": cpu,
+                "max": str(maximum),
+                "min": str(minimum) if minimum.exists() else None,
+                "info_max": str(info_max),
+                "governor": str(governor) if governor.exists() else None,
+            })
+
+    return paths
+
+
+def save_original_state(cpus):
+    global _saved
+
+    state = {
+        "pstate": None,
+        "cpus": {},
+    }
+
+    pstate = pstate_percent_path()
+
+    if pstate:
+        state["pstate"] = {
+            "path": pstate,
+            "value": read(pstate),
+        }
+
+    for item in cpu_freq_paths(cpus):
+        cpu = str(item["cpu"])
+
+        state["cpus"][cpu] = {
+            "max": read(item["max"]),
+            "governor": read(item["governor"]) if item["governor"] else None,
+        }
+
+    _saved = state
+
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+def restore():
+    state = _saved
+
+    if not state and STATE_FILE.exists():
+        try:
+            state = json.loads(STATE_FILE.read_text())
+        except Exception:
+            state = {}
+
+    pstate = state.get("pstate")
+    if pstate and pstate.get("path") and pstate.get("value") is not None:
+        write(pstate["path"], pstate["value"])
+
+    for cpu, item in state.get("cpus", {}).items():
+        base = Path(f"/sys/devices/system/cpu/cpu{cpu}/cpufreq")
+
+        maximum = base / "scaling_max_freq"
+        governor = base / "scaling_governor"
+
+        if item.get("max") is not None and maximum.exists():
+            write(maximum, item["max"])
+
+        if item.get("governor") is not None and governor.exists():
+            write(governor, item["governor"])
+
+    log("CPU policy restored")
+
+
+def target_frequency(item, pct):
+    minimum = read(item["min"]) if item["min"] else None
+    maximum = read(item["info_max"])
+
+    if maximum is None:
+        return None
+
+    try:
+        maximum = int(maximum)
+        minimum = int(minimum) if minimum is not None else 0
+    except ValueError:
+        return None
+
+    value = minimum + ((maximum - minimum) * pct // 100)
+    return max(minimum, min(maximum, value))
+
+
+def apply_percent(pct, cpus, use_performance=True):
+    pstate = pstate_percent_path()
+
+    if pstate:
+        write(pstate, pct)
+        return
+
+    paths = cpu_freq_paths(cpus)
+
+    for item in paths:
+        maximum = target_frequency(item, pct)
+        if maximum is None:
+            continue
+
+        write(item["max"], maximum)
+
+        if use_performance and item["governor"]:
+            available = read(
+                Path(item["governor"]).parent / "scaling_available_governors"
+            ) or ""
+
+            if "performance" in available.split():
+                write(item["governor"], "performance")
+
+
+def llm_active(previous):
+    current = {}
+    total_delta = 0
+
+    for pid in ollama_pids():
+        now = proc_stat(pid)
+        if now is None:
+            continue
+
+        current[pid] = now
+
+        old = previous.get(pid)
+        if old is not None:
+            delta = now - old
+            if delta > 0:
+                total_delta += delta
+
+    return current, total_delta > 0
+
+
+def signal_handler(signum, frame):
+    global _running
+    _running = False
+
+
+def main():
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    cpus = online_cpus()
+
+    if not cpus:
+        raise SystemExit("No online CPUs found")
+
+    save_original_state(cpus)
+
+    pstate = pstate_percent_path()
+
+    if pstate:
+        log(f"performance interface: {pstate}")
+    else:
+        log(f"frequency interface: CPUs={cpus}")
+
+    log("policy: ACTIVE=99%, THERMAL=50%, IDLE=5%, thermal trip=95C")
+
+    previous = {}
+    thermal_latched = False
+    last_state = None
+
+    while _running:
+        current, active = llm_active(previous)
+        previous = current
+
+        temperature = thermal_max()
+
+        if temperature is not None and temperature >= THERMAL_HIGH_MC:
+            thermal_latched = True
+        elif temperature is not None and temperature < THERMAL_RECOVER_MC:
+            thermal_latched = False
+
+        if active:
+            if thermal_latched:
+                state = "THERMAL_50"
+                pct = THERMAL_PCT
+            else:
+                state = "ACTIVE_99"
+                pct = ACTIVE_PCT
+        else:
+            state = "IDLE_5"
+            pct = IDLE_PCT
+
+        if state != last_state:
+            temp_text = (
+                f"{temperature / 1000:.1f}C"
+                if temperature is not None
+                else "unknown"
+            )
+
+            log(
+                f"state={state} pct={pct} "
+                f"llm_active={active} temp={temp_text}"
+            )
+
+            apply_percent(pct, cpus)
+            last_state = state
+
+        time.sleep(POLL_S)
+
+    restore()
+
+
+if __name__ == "__main__":
+    if "--restore" in os.sys.argv:
+        restore()
+    else:
+        main()
+PY
+
+chmod 755 tools/llm_cpu_governor.py
+
+python3.11 -m py_compile tools/llm_cpu_governor.py
+
+Install it as a system service:
+
+cat >/etc/systemd/system/odysseus-llm-cpu.service <<'EOF'
+[Unit]
+Description=Odysseus LLM CPU Performance Governor
+After=ollama.service
+Wants=ollama.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /data/sda4/odysseus/tools/llm_cpu_governor.py
+ExecStopPost=/usr/bin/python3 /data/sda4/odysseus/tools/llm_cpu_governor.py --restore
+Restart=always
+RestartSec=2
+Nice=-10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now odysseus-llm-cpu.service
+systemctl is-active odysseus-llm-cpu.service
