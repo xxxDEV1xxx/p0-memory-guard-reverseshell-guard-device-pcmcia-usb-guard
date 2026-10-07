@@ -1,0 +1,77 @@
+
+systemctl start p0-memory-identity-beastmode.service
+systemctl status p0-memory-identity-beastmode.service --no-pager
+journalctl -u p0-memory-identity-beastmode.service -n 10 --no-pager
+
+#Block a command
+#cd /data/P0-memory-identity-beastmode
+#./beastmode_loader.isolated block dd
+#systemctl restart p0-memory-identity-beastmode.service
+#Verify it is listed:
+#./beastmode_loader.isolated list
+#Allow / unblock a command
+#cd /data/P0-memory-identity-beastmode
+#./beastmode_loader.isolated unblock dd
+#systemctl restart p0-memory-identity-beastmode.service
+#Verify:
+#./beastmode_loader.isolated list
+
+#Test that the block works
+#With dd blocked:
+(
+  echo $BASHPID > /sys/fs/cgroup/system.slice/p0-memory-identity-beastmode.service/cgroup.procs
+  exec dd if=/dev/zero of=/dev/null bs=1M count=1
+)
+echo "rc=$?"
+#Expected:
+#Killed
+#rc=137
+
+#Then confirm the module loaded the blocklist:
+journalctl -u p0-memory-identity-beastmode.service -n 10 --no-pager
+#To prove the rule is actually removed, unblock dd, restart, and run the same test; dd should complete normally.
+################################## false command
+#test a process whose argv[0] claims to be one command while the actual executable is another.
+
+#Test 1 — yes claiming to be cat
+(
+  echo $BASHPID > /sys/fs/cgroup/system.slice/p0-memory-identity-beastmode.service/cgroup.procs
+  exec -a cat /usr/bin/yes
+)
+echo "rc=$?"
+
+#Expected:
+
+#Killed
+#rc=137
+#Test 2 — sleep claiming to be cat
+(
+  echo $BASHPID > /sys/fs/cgroup/system.slice/p0-memory-identity-beastmode.service/cgroup.procs
+  exec -a cat /usr/bin/sleep 60
+)
+echo "rc=$?"
+
+#Expected:
+
+#Killed
+#rc=137
+#Verify the enforcement decision
+#journalctl -u p0-memory-identity-beastmode.service -n 20 --no-pager | grep 'P0_IDENTITY_'
+
+#You want to see:
+
+#P0_IDENTITY_OBSERVE ... claimed=cat actual=/usr/bin/yes
+#P0_IDENTITY_DECISION ... decision=IDENTITY_MISMATCH
+
+#or:
+
+#P0_IDENTITY_OBSERVE ... claimed=cat actual=/usr/bin/sleep
+#P0_IDENTITY_DECISION ... decision=IDENTITY_MISMATCH
+#Control test — correctly claiming sleep
+(
+  echo $BASHPID > /sys/fs/cgroup/system.slice/p0-memory-identity-beastmode.service/cgroup.procs
+  exec -a sleep /usr/bin/sleep 1
+)
+echo "rc=$?"
+
+#Expected: it completes normally with rc=0, assuming the corresponding memory identity matches.
