@@ -448,8 +448,19 @@ import subprocess
 import sys
 import urllib.request
 
-MODEL = "qwen2.5:1.5b"
 URL = "http://127.0.0.1:11434/api/chat"
+
+MODELS = {
+    "1": "qwen2.5:0.5b",
+    "2": "qwen2.5:1.5b",
+    "3": "qwen3.5:9b",
+}
+
+LABELS = {
+    "1": "SMALL",
+    "2": "MEDIUM",
+    "3": "LARGE",
+}
 
 
 def freezer(action):
@@ -461,9 +472,9 @@ def freezer(action):
     )
 
 
-def ask(messages):
+def model_chat(model, messages):
     payload = {
-        "model": MODEL,
+        "model": model,
         "messages": messages,
         "stream": True,
         "think": False,
@@ -471,6 +482,7 @@ def ask(messages):
         "options": {
             "num_ctx": 8192,
             "num_batch": 8192,
+            "num_thread": 3,
             "num_predict": 256,
         },
     }
@@ -484,13 +496,13 @@ def ask(messages):
 
     answer = []
 
-    with urllib.request.urlopen(req, timeout=300) as response:
+    with urllib.request.urlopen(req, timeout=600) as response:
         while True:
-            line = response.readline()
-            if not line:
+            raw = response.readline()
+            if not raw:
                 break
 
-            obj = json.loads(line)
+            obj = json.loads(raw)
 
             text = (obj.get("message") or {}).get("content") or ""
             if text:
@@ -508,40 +520,90 @@ def ask(messages):
 
 
 def main():
-    messages = [{"role": "system", "content": "You are Odysseus."}]
+    selector = sys.argv[1] if len(sys.argv) > 1 else "2"
 
-    # Park the model while waiting for keyboard input.
-    freezer("freeze")
+    if selector in {"sleep", "freeze"}:
+        freezer("freeze")
+        print("LLM: FROZEN")
+        return
 
-    print(f"{MODEL} parked. Type and press Enter.", flush=True)
-
-    while True:
-        try:
-            text = input("> ")
-        except (EOFError, KeyboardInterrupt):
-            print()
-            freezer("freeze")
-            return
-
-        if not text.strip():
-            continue
-
-        # User submitted a line: wake the preserved llama.cpp process.
+    if selector in {"wake", "thaw"}:
         freezer("thaw")
+        print("LLM: THAWED")
+        return
 
-        messages.append({"role": "user", "content": text})
+    if selector == "status":
+        subprocess.run(
+            ["systemctl", "show", "ollama.service",
+             "-p", "ActiveState",
+             "-p", "FreezerState",
+             "-p", "MainPID"],
+            check=False,
+        )
+        subprocess.run(
+            ["curl", "-sS", "http://127.0.0.1:11434/api/ps"],
+            check=False,
+        )
+        print()
+        return
 
-        try:
-            answer = ask(messages)
-        except Exception as exc:
-            print(f"\n[LLM ERROR] {exc}", file=sys.stderr, flush=True)
-            messages.pop()
+    if selector not in MODELS:
+        print("Usage:")
+        print("  llm 1       # smallest  qwen2.5:0.5b")
+        print("  llm 2       # medium    qwen2.5:1.5b")
+        print("  llm 3       # large     qwen3.5:9b")
+        print("  llm sleep")
+        print("  llm wake")
+        print("  llm status")
+        return
+
+    model = MODELS[selector]
+
+    # Ensure the selected model can execute.
+    freezer("thaw")
+
+    print(
+        f"{LABELS[selector]} LLM: {model}",
+        flush=True,
+    )
+
+    messages = [
+        {"role": "system", "content": "You are Odysseus."}
+    ]
+
+    try:
+        while True:
+            try:
+                text = input("> ")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+
+            if not text.strip():
+                continue
+
+            messages.append({
+                "role": "user",
+                "content": text,
+            })
+
+            try:
+                answer = model_chat(model, messages)
+            except Exception as exc:
+                print(f"\n[LLM ERROR] {exc}", file=sys.stderr, flush=True)
+                messages.pop()
+                freezer("freeze")
+                continue
+
+            messages.append({
+                "role": "assistant",
+                "content": answer,
+            })
+
+            # Answer completed: park the resident runner.
             freezer("freeze")
-            continue
 
-        messages.append({"role": "assistant", "content": answer})
-
-        # Terminal output is complete. Freeze the resident model.
+    finally:
         freezer("freeze")
 
 
@@ -550,6 +612,7 @@ if __name__ == "__main__":
 PY
 
 chmod 755 /usr/local/bin/llm
+python3.11 -m py_compile /usr/local/bin/llm
 
 
 
