@@ -617,3 +617,11 @@ EOF
 . /root/.bashrc
 
 type llm
+cat >>/root/.bashrc <<'EOF'
+
+unset -f llm 2>/dev/null || true
+llm() { command /usr/local/bin/llm "$@"; }
+EOF
+unset -f llm 2>/dev/null || true
+. /root/.bashrc
+type -a llm
